@@ -15,7 +15,6 @@ from typing import (
 )
 
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.memory import BaseMemory
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
     from nanobot.session.manager import Session, SessionManager
 
 
-class NanobotFileMemory(BaseMemory):
+class NanobotFileMemory:
     """
     LangChain-compatible memory that uses nanobot's file-based storage.
 
@@ -253,7 +252,7 @@ class NanobotChatHistory(BaseChatMessageHistory):
         return result
 
 
-class ConsolidatedMemory(BaseMemory):
+class ConsolidatedMemory:
     """
     Memory with automatic consolidation for long-running conversations.
 
@@ -335,7 +334,7 @@ def create_memory(
     consolidation_threshold: int = 100,
     provider: Optional[Any] = None,
     session_manager: Optional[Any] = None,
-) -> BaseMemory:
+):
     """
     Create a memory instance with the specified configuration.
 
