@@ -432,17 +432,27 @@ def agent(
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    architecture: str = typer.Option(None, "--architecture", "-a", help="Agent architecture (native or langchain)"),
 ):
     """Interact with the agent directly."""
     from loguru import logger
 
-    from nanobot.agent.loop import AgentLoop
-    from nanobot.bus.queue import MessageBus
     from nanobot.config.loader import get_data_dir, load_config
     from nanobot.cron.service import CronService
 
     config = load_config()
     sync_workspace_templates(config.workspace_path)
+
+    # Determine which architecture to use
+    agent_architecture = architecture or config.agents.defaults.architecture
+
+    if agent_architecture == "langchain":
+        console.print(f"{__logo__} Using LangChain architecture\n")
+        return _run_langchain_agent(config, message, session_id, markdown, logs)
+
+    # Default: use native architecture
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -905,6 +915,93 @@ def _login_github_copilot() -> None:
     except Exception as e:
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
+
+
+# ============================================================================
+# LangChain Agent Implementation
+# ============================================================================
+
+
+def _run_langchain_agent(config: Config, message: str | None, session_id: str, markdown: bool, logs: bool) -> None:
+    """Run the agent using LangChain architecture."""
+    from loguru import logger
+
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
+    from nanobot.agent.tools.shell import ExecTool
+    from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+    from nanobot.agent.langchain import LangChainAgent
+    from nanobot.session.manager import SessionManager
+
+    if logs:
+        logger.enable("nanobot")
+    else:
+        logger.disable("nanobot")
+
+    provider = _make_provider(config)
+
+    # Create tool registry
+    tools = ToolRegistry()
+    for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
+        tools.register(cls(
+            workspace=config.workspace_path,
+            allowed_dir=config.workspace_path if config.tools.restrict_to_workspace else None,
+        ))
+    tools.register(ExecTool(
+        working_dir=str(config.workspace_path),
+        timeout=config.tools.exec.timeout,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        path_append=config.tools.exec.path_append,
+    ))
+    tools.register(WebSearchTool(
+        api_key=config.tools.web.search.api_key or None,
+        proxy=config.tools.web.proxy or None,
+    ))
+    tools.register(WebFetchTool(proxy=config.tools.web.proxy or None))
+
+    # Create session manager
+    session_manager = SessionManager(config.workspace_path)
+
+    # Create LangChain agent
+    agent = LangChainAgent(
+        provider=provider,
+        tools=tools,
+        workspace=config.workspace_path,
+        session_manager=session_manager,
+        model=config.agents.defaults.model,
+        temperature=config.agents.defaults.temperature,
+        max_tokens=config.agents.defaults.max_tokens,
+        memory_window=config.agents.defaults.memory_window,
+    )
+
+    # Show spinner when logs are off
+    def _thinking_ctx():
+        if logs:
+            from contextlib import nullcontext
+            return nullcontext()
+        return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
+
+    async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        """Display progress updates during agent execution."""
+        ch = config.channels
+        if ch and tool_hint and not ch.send_tool_hints:
+            return
+        if ch and not tool_hint and not ch.send_progress:
+            return
+        console.print(f"  [dim]↳ {content}[/dim]")
+
+    async def run_once():
+        with _thinking_ctx():
+            response = await agent.process_message(
+                content=message,
+                session_key=session_id,
+                channel="cli",
+                chat_id="langchain_user",
+                on_progress=_cli_progress,
+            )
+        _print_agent_response(response, render_markdown=markdown)
+
+    asyncio.run(run_once())
 
 
 if __name__ == "__main__":
